@@ -1,4 +1,5 @@
 streamlit
 edge-tts
-pydub
 srt
+pydub
+asyncio
