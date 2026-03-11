@@ -6,14 +6,12 @@ import io
 import re
 from pydub import AudioSegment
 
-# --- កំណត់ទំព័រ ---
-st.set_page_config(page_title="Khmer TTS - Fixed Audio", page_icon="🎙️")
+st.set_page_config(page_title="Khmer TTS - Audio Fix", page_icon="🎙️")
 
 async def fetch_audio_chunk(text, voice, rate_str, pitch_str):
-    """ទាញយកសំឡេងពី Microsoft Edge TTS"""
     try:
-        # លុបសញ្ញាដែលអាចធ្វើឱ្យ AI គាំង
-        clean_text = re.sub(r'[^\u1780-\u17FF\u19E0-\u19FFa-zA-Z0-9\s]', '', text)
+        # សម្អាតអត្ថបទឱ្យស្អាតបំផុតសម្រាប់ AI
+        clean_text = re.sub(r'[^\u1780-\u17FF\u19E0-\u19FFa-zA-Z0-9\s\.]', '', text)
         if not clean_text.strip(): return None
         
         communicate = edge_tts.Communicate(clean_text, voice, rate=rate_str, pitch=pitch_str)
@@ -22,52 +20,54 @@ async def fetch_audio_chunk(text, voice, rate_str, pitch_str):
             if chunk["type"] == "audio":
                 audio_data += chunk["data"]
         return audio_data
-    except Exception as e:
-        return None
+    except: return None
 
 async def generate_audio(srt_content, voice, rate, pitch):
     try:
         subs = list(srt.parse(srt_content))
-    except Exception as e:
-        st.error(f"ទម្រង់ SRT មិនត្រឹមត្រូវ៖ {e}")
+    except:
+        st.error("ទម្រង់ SRT មិនត្រឹមត្រូវ")
         return None
 
-    if not subs:
-        st.warning("រកមិនឃើញអត្ថបទក្នុង SRT ទេ។")
-        return None
-    
     rate_str = f"{rate:+d}%"
     pitch_str = f"{pitch:+d}Hz"
 
-    # ១. ទាញយកសំឡេង
     tasks = [fetch_audio_chunk(sub.content, voice, rate_str, pitch_str) for sub in subs]
     audio_chunks = await asyncio.gather(*tasks)
 
-    # ២. បញ្ចូលសំឡេង (Perfect Sync Logic)
+    # បង្កើត Timeline ទទេ
     final_combined = AudioSegment.silent(duration=0)
-    found_audio = False
     
     for i, sub in enumerate(subs):
         if audio_chunks[i]:
-            found_audio = True
             segment = AudioSegment.from_file(io.BytesIO(audio_chunks[i]), format="mp3")
             
-            # កំណត់ម៉ោង
+            # ម៉ោងក្នុង SRT
             srt_start_ms = int(sub.start.total_seconds() * 1000)
+            srt_end_ms = int(sub.end.total_seconds() * 1000)
+            target_duration = srt_end_ms - srt_start_ms
             
-            current_len = len(final_combined)
-            if srt_start_ms > current_len:
-                final_combined += AudioSegment.silent(duration=srt_start_ms - current_len)
+            # --- បច្ចេកទេស Stretch សំឡេងឱ្យត្រូវម៉ោង ---
+            current_dur = len(segment)
+            if current_dur > target_duration and target_duration > 0:
+                # ពន្លឿនសំឡេងបើវាវែងជាងម៉ោង SRT
+                speed_ratio = current_dur / target_duration
+                segment = segment._spawn(segment.raw_data, overrides={
+                    "frame_rate": int(segment.frame_rate * speed_ratio)
+                }).set_frame_rate(segment.frame_rate)
+            
+            # បញ្ចូលក្នុង Timeline
+            curr_len = len(final_combined)
+            if srt_start_ms > curr_len:
+                final_combined += AudioSegment.silent(duration=srt_start_ms - curr_len)
             
             final_combined = final_combined.overlay(segment, position=srt_start_ms)
             
-            # ពង្រីក Duration ឱ្យដល់ម៉ោងបញ្ចប់ក្នុង SRT
-            srt_end_ms = int(sub.end.total_seconds() * 1000)
+            # បង្គ្រប់ Duration ឱ្យដល់ម៉ោងបញ្ចប់
             if len(final_combined) < srt_end_ms:
                 final_combined += AudioSegment.silent(duration=srt_end_ms - len(final_combined))
 
-    if not found_audio:
-        return None
+    if len(final_combined) == 0: return None
 
     buffer = io.BytesIO()
     final_combined.export(buffer, format="mp3")
@@ -76,22 +76,16 @@ async def generate_audio(srt_content, voice, rate, pitch):
 # --- UI ---
 st.title("🎙️ Khmer TTS - Sync Fix")
 
-with st.sidebar:
-    voice_choice = st.selectbox("អ្នកអាន:", ["km-KH-SreymomNeural", "km-KH-PisethNeural"])
-    speed = st.slider("ល្បឿន (%):", -50, 100, 20)
-    pitch = st.slider("កម្រិតសំឡេង (Hz):", -20, 20, 0)
-
-srt_input = st.text_area("បញ្ចូល SRT របស់អ្នកនៅទីនេះ:", height=300)
+voice_choice = st.selectbox("អ្នកអាន:", ["km-KH-SreymomNeural", "km-KH-PisethNeural"])
+speed = st.slider("ល្បឿន (%):", -50, 100, 20)
+srt_input = st.text_area("បញ្ចូល SRT:", height=300)
 
 if st.button("🔊 ផលិតសំឡេង"):
     if srt_input.strip():
-        with st.spinner("កំពុងទាញយកសំឡេងពី Server..."):
-            final_audio = asyncio.run(generate_audio(srt_input, voice_choice, speed, pitch))
-            if final_audio and len(final_audio) > 500: # ត្រូវមានទិន្នន័យលើសពី 500 bytes
-                st.success("ផលិតបានជោគជ័យ!")
+        with st.spinner("កំពុងដំណើរការ..."):
+            final_audio = asyncio.run(generate_audio(srt_input, voice_choice, speed, 0))
+            if final_audio:
                 st.audio(final_audio)
-                st.download_button("📥 ទាញយក MP3", final_audio, "khmer_audio.mp3")
+                st.download_button("📥 ទាញយក MP3", final_audio, "audio.mp3")
             else:
-                st.error("⚠️ អត់ឮសំឡេង៖ ម៉ាស៊ីនមិនអាចទាញយកសំឡេងបានទេ។ សូមឆែកអត្ថបទ SRT ឬអ៊ីនធឺណិតរបស់អ្នក។")
-    else:
-        st.warning("សូមបញ្ចូលអក្សរ SRT សិន!")
+                st.error("មិនអាចផលិតសំឡេងបានទេ។ សូមពិនិត្យអត្ថបទ SRT របស់បង។")
