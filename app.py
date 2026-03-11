@@ -6,7 +6,7 @@ import io
 from pydub import AudioSegment
 
 # --- កំណត់ទំព័រ ---
-st.set_page_config(page_title="Khmer TTS - High Speed Start Sync", page_icon="🎙️")
+st.set_page_config(page_title="Khmer TTS Pro - Sync & Clear", page_icon="🎙️")
 
 def parse_srt(srt_text):
     """បំប្លែង SRT ដើម្បីយកតែ Start Time និង អត្ថបទ"""
@@ -21,7 +21,7 @@ def parse_srt(srt_text):
         
     for match in matches:
         subtitles.append({
-            "start_ms": to_ms(match[1]),
+            "start_ms": int(to_ms(match[1])),
             "text": match[3].strip()
         })
     return subtitles
@@ -35,7 +35,8 @@ async def fetch_audio_chunk(text, voice, rate_str, pitch_str):
             if chunk["type"] == "audio":
                 audio_data += chunk["data"]
         return audio_data
-    except Exception:
+    except Exception as e:
+        print(f"Error fetching chunk: {e}")
         return None
 
 async def generate_audio(srt_text, voice, rate, pitch):
@@ -43,61 +44,72 @@ async def generate_audio(srt_text, voice, rate, pitch):
     if not subs: return None
     
     # កំណត់ទម្រង់ល្បឿន និងកម្រិតសំឡេង
+    # ចំណាំ៖ ក្នុង edge-tts ការប្រើ +10% គឺលឿនល្មម បើប្រើ +100% គឺស្តាប់មិនបានទេ
     rate_str = f"{rate:+d}%"
     pitch_str = f"{pitch:+d}Hz"
 
-    # ១. ទាញយកសំឡេងគ្រប់បន្ទាត់ក្នុងពេលតែមួយ (Concurrency)
+    # ១. ទាញយកសំឡេងគ្រប់បន្ទាត់ក្នុងពេលតែមួយ (Concurrency) ដើម្បីល្បឿន
     tasks = [fetch_audio_chunk(sub['text'], voice, rate_str, pitch_str) for sub in subs]
     audio_chunks = await asyncio.gather(*tasks)
 
-    # ២. បង្កើត Timeline ស្ងាត់ (Buffer 30s សម្រាប់ការពារការដាច់)
-    max_duration = subs[-1]['start_ms'] + 30000 
-    final_combined = AudioSegment.silent(duration=max_duration)
+    # ២. បង្កើត Timeline សំឡេង
+    final_combined = AudioSegment.empty()
     
-    last_end_point = 0
     for i, sub in enumerate(subs):
         if audio_chunks[i]:
+            # បំប្លែង chunk ទៅជា AudioSegment
             segment = AudioSegment.from_file(io.BytesIO(audio_chunks[i]), format="mp3")
             
-            # ដាក់សំឡេងឱ្យចំ Start Time ក្នុង SRT (អានតាមល្បឿនធម្មជាតិរបស់ AI)
-            final_combined = final_combined.overlay(segment, position=sub['start_ms'])
+            # រយៈពេលបច្ចុប្បន្ននៃ Audio ដែលបានផលិតរួច (ms)
+            current_duration = len(final_combined)
             
-            # ចំណាំចំណុចបញ្ចប់ចុងក្រោយបង្អស់
-            end_at = sub['start_ms'] + len(segment)
-            if end_at > last_end_point:
-                last_end_point = end_at
+            # គណនាចន្លោះដែលត្រូវបន្ថែម Silence (ភាពស្ងាត់) ដើម្បីឱ្យចំ Start Time ក្នុង SRT
+            wait_time = sub['start_ms'] - current_duration
+            
+            if wait_time > 0:
+                # បន្ថែមភាពស្ងាត់បើ Start Time មិនទាន់ដល់
+                final_combined += AudioSegment.silent(duration=wait_time)
+                final_combined += segment
+            else:
+                # បើ Audio មុនវែងពេក រហូតដល់ហួស Start Time ថ្មី យើងប្រើ Overlay ដើម្បីកុំឱ្យបាត់ Sync
+                final_combined = final_combined.overlay(segment, position=sub['start_ms'])
 
-    # ៣. កាត់តម្រឹម File ឱ្យនៅត្រឹមសំឡេងបញ្ចប់ពិតប្រាកដ
-    final_combined = final_combined[:last_end_point + 1000]
-
+    # នាំចេញជា MP3
     buffer = io.BytesIO()
     final_combined.export(buffer, format="mp3")
     return buffer.getvalue()
 
 # --- ចំណុចប្រទាក់អ្នកប្រើ (UI) ---
-st.title("🎙️ Khmer TTS - High Speed Sync")
-st.info("💡 កំណែថ្មី៖ ល្បឿនអានត្រូវបានដំឡើង និងអានចំតែនាទីចាប់ផ្ដើម (Start Time) ដើម្បីរក្សាគុណភាពសំឡេង។")
+st.title("🎙️ Khmer TTS - Sync & Clear")
+st.markdown("""
+<style>
+    .stTextArea textarea { font-family: 'Kantumruy Pro', sans-serif; }
+</style>
+""", unsafe_allow_html=True)
+
+st.info("💡 **ដំបូន្មាន:** ដើម្បីឱ្យសំឡេងអានបានពីរោះ និងច្បាស់ សូមប្រើល្បឿនចន្លោះពី **+0%** ដល់ **+20%**។")
 
 col1, col2 = st.columns(2)
 with col1:
     voice_choice = st.selectbox("ជ្រើសរើសអ្នកអាន:", ["km-KH-SreymomNeural", "km-KH-PisethNeural"])
-    # កំណត់ Default ល្បឿនទៅ 100 តាមការចង់បានរបស់អ្នក
-    speed = st.slider("ល្បឿនអានទូទៅ (%):", 0, 100, 100, 5)
+    # ប្តូរលំនាំដើមមក 10% វិញដើម្បីឱ្យអានច្បាស់
+    speed = st.slider("ល្បឿនអាន (%):", -50, 100, 10, 5)
 with col2:
     pitch = st.slider("កម្រិតសំឡេង (Hz):", -20, 20, 0, 1)
 
-srt_input = st.text_area("បញ្ចូលអត្ថបទ SRT របស់អ្នកនៅទីនេះ:", height=250)
+srt_input = st.text_area("បញ្ចូលអត្ថបទ SRT របស់អ្នកនៅទីនេះ:", height=250, placeholder="1\n00:00:01,000 --> 00:00:03,000\nសួស្តីបងប្អូនទាំងអស់គ្នា!")
 
 if st.button("🔊 ផលិតសំឡេង"):
     if srt_input.strip():
-        with st.spinner("កំពុងផលិតសំឡេងល្បឿនលឿន..."):
+        with st.spinner("កំពុងផលិតសំឡេង... សូមរង់ចាំ"):
             try:
                 final_audio = asyncio.run(generate_audio(srt_input, voice_choice, speed, pitch))
                 if final_audio:
                     st.audio(final_audio)
-                    st.download_button("📥 ទាញយក MP3", final_audio, "high_speed_sync.mp3")
+                    st.download_button("📥 ទាញយក MP3", final_audio, "khmer_tts_sync.mp3")
+                else:
+                    st.error("មិនអាចផលិតសំឡេងបានទេ! សូមពិនិត្យទម្រង់ SRT ឡើងវិញ។")
             except Exception as e:
                 st.error(f"បញ្ហា៖ {e}")
     else:
         st.warning("សូមបញ្ចូលអត្ថបទ SRT ជាមុនសិន!")
-
