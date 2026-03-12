@@ -3,16 +3,12 @@ import asyncio
 import edge_tts
 import srt
 import io
-import re
-from pydub import AudioSegment
-from pydub.effects import speedup
+from pydub import AudioSegment, effects
 
-st.set_page_config(page_title="Khmer TTS HD - Sync", page_icon="🎙️")
+st.set_page_config(page_title="Khmer TTS - Natural Human Voice", page_icon="🎙️")
 
 async def fetch_audio(text, voice, rate_str):
-    """ទាញយកសំឡេងដើមដែលមានគុណភាពខ្ពស់បំផុត"""
     try:
-        # បន្ថែមពាក្យបញ្ជា '--write-subtitles' មិនចាំបាច់ទេ តែយើងបង្កើន Quality តាមរយៈ Communicate
         communicate = edge_tts.Communicate(text, voice, rate=rate_str)
         audio_data = b""
         async for chunk in communicate.stream():
@@ -21,73 +17,65 @@ async def fetch_audio(text, voice, rate_str):
         return audio_data
     except: return None
 
-def perfect_speed_sync(audio, target_ms):
-    """ពន្លឿនសំឡេងឱ្យត្រូវម៉ោងដោយរក្សាសំឡេងឱ្យនៅច្បាស់ (High Fidelity)"""
+def process_natural_voice(audio, target_ms):
+    """កែសម្រួលឱ្យសំឡេងហាប់ណែន និងតភ្ជាប់គ្នាបានល្អ"""
+    # ១. កាត់ចន្លោះស្ងាត់ដែល AI បង្កើតចោល (កាត់សូរសព្ទដកដង្ហើម)
+    audio = effects.strip_silence(audio, silence_thresh=-50, padding=10)
+    
     current_ms = len(audio)
-    if target_ms <= 0 or current_ms <= target_ms:
-        return audio
+    if target_ms > 0 and current_ms > target_ms:
+        # ២. ពន្លឿនឱ្យត្រូវម៉ោង SRT ដោយរក្សាគុណភាពខ្ពស់
+        speed_ratio = current_ms / target_ms
+        # ប្រើ speedup ជាមួយ chunk ខ្លី ដើម្បីឱ្យរលូន
+        audio = effects.speedup(audio, playback_speed=min(speed_ratio, 1.8), chunk_size=50, crossfade=20)
     
-    # គណនាល្បឿនដែលត្រូវបង្កើន
-    playback_speed = current_ms / target_ms
-    
-    # កម្រិតល្បឿនត្រឹម ២ដង ដើម្បីកុំឱ្យបែកសំឡេង
-    if playback_speed > 2.0: playback_speed = 2.0
-    
-    # ប្រើ speedup ជាមួយ chunk_size ធំល្មម (60ms) ដើម្បីឱ្យសំឡេងថ្លា មិនស្រគាត្រចៀក
-    # crossfade ជួយឱ្យការតភ្ជាប់រលកសំឡេងរលូន
-    sync_audio = speedup(audio, playback_speed=playback_speed, chunk_size=60, crossfade=25)
-    
-    # កាត់តម្រឹមឱ្យចំម៉ោង SRT បន្ទាប់ពី Speedup រួច
-    return sync_audio[:target_ms]
+    return audio[:target_ms] if target_ms > 0 else audio
 
-async def generate_hd_audio(srt_content, voice, base_speed):
+async def generate_human_audio(srt_content, voice, base_speed):
     try:
         subs = list(srt.parse(srt_content))
     except: return None
 
     rate_str = f"{base_speed:+d}%"
-    total_duration = int(subs[-1].end.total_seconds() * 1000)
-    # បង្កើត Background ស្ងាត់ដែលមាន High Sample Rate (48kHz)
-    final_audio = AudioSegment.silent(duration=total_duration, frame_rate=48000)
+    total_ms = int(subs[-1].end.total_seconds() * 1000)
+    final_audio = AudioSegment.silent(duration=total_ms, frame_rate=44100)
     
-    progress_bar = st.progress(0)
-    for i, sub in enumerate(subs):
+    for sub in subs:
         audio_data = await fetch_audio(sub.content, voice, rate_str)
         if audio_data:
-            # អាន MP3 ឱ្យទៅជា Segment
             segment = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
             
             start_ms = int(sub.start.total_seconds() * 1000)
             end_ms = int(sub.end.total_seconds() * 1000)
-            target_ms = end_ms - start_ms
+            target_dur = end_ms - start_ms
             
-            # ធ្វើឱ្យសំឡេងត្រូវម៉ោង និងច្បាស់
-            processed_segment = perfect_speed_sync(segment, target_ms)
+            # កែសម្រួលសំឡេងឱ្យ "ហាប់" ដូចមនុស្សនិយាយ
+            processed_segment = process_natural_voice(segment, target_dur)
             
-            # Overlay ចូល Timeline
+            # ប្រើ Overlay ជាមួយកម្រិត Gain បន្តិចដើម្បីឱ្យសំឡេងច្បាស់
             final_audio = final_audio.overlay(processed_segment, position=start_ms)
-            
-        progress_bar.progress((i + 1) / len(subs))
 
-    # Export ជា MP3 ជាមួយ Bitrate ខ្ពស់បំផុត (320kbps)
+    # បង្កើនកម្រិតសំឡេងឱ្យស្មើគ្នា (Normalization)
+    final_audio = effects.normalize(final_audio)
+    
     buffer = io.BytesIO()
-    final_audio.export(buffer, format="mp3", bitrate="320k")
+    final_audio.export(buffer, format="mp3", bitrate="192k")
     return buffer.getvalue()
 
-# --- UI Layout ---
-st.title("🎙️ Khmer TTS HD & Sync")
-st.success("កំណែថ្មី៖ បង្កើនកម្រិតសំឡេងឱ្យច្បាស់ (320kbps) និងប្រើបច្ចេកទេស Sync មិនឱ្យបែកសំឡេង។")
+# --- UI ---
+st.title("🎙️ Khmer TTS - កំណែអានរលូនដូចមនុស្ស")
+st.info("កូដនេះលុបចន្លោះ 'ដកដង្ហើម' ចោល និងធ្វើឱ្យសំឡេងតភ្ជាប់គ្នាបានរលូនបំផុត។")
 
-voice = st.selectbox("ជ្រើសរើសអ្នកអាន:", ["km-KH-SreymomNeural", "km-KH-PisethNeural"])
-speed = st.slider("ល្បឿនអានមូលដ្ឋាន (%):", -50, 50, 0) # ដាក់ ០ ដើម្បីឱ្យច្បាស់បំផុត
+voice = st.selectbox("អ្នកអាន:", ["km-KH-SreymomNeural", "km-KH-PisethNeural"])
+speed = st.slider("ល្បឿនអានមូលដ្ឋាន (%):", -50, 50, 15)
 srt_text = st.text_area("បញ្ចូលអត្ថបទ SRT:", height=200)
 
-if st.button("🔊 ផលិតសំឡេងកម្រិតច្បាស់"):
+if st.button("🔊 ផលិតសំឡេងមនុស្ស"):
     if srt_text.strip():
-        with st.spinner("កំពុងផលិតសំឡេងកម្រិត HD..."):
+        with st.spinner("កំពុងកែសម្រួលរលកសំឡេង..."):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            audio = loop.run_until_complete(generate_hd_audio(srt_text, voice, speed))
+            audio = loop.run_until_complete(generate_human_audio(srt_text, voice, speed))
             if audio:
                 st.audio(audio)
-                st.download_button("📥 ទាញយក MP3 (320kbps)", audio, "khmer_hd_sync.mp3")
+                st.download_button("📥 ទាញយក MP3 (Human Flow)", audio, "human_khmer.mp3")
