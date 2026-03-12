@@ -5,7 +5,7 @@ import srt
 import io
 from pydub import AudioSegment, effects
 
-st.set_page_config(page_title="Khmer TTS - Fast Flow", page_icon="🎙️")
+st.set_page_config(page_title="Khmer TTS - Auto Speed Sync", page_icon="🎙️")
 
 async def fetch_audio(text, voice, rate_str):
     try:
@@ -17,41 +17,48 @@ async def fetch_audio(text, voice, rate_str):
         return audio_data
     except: return None
 
-def process_voice_flow(audio, target_ms):
-    # កាត់ចន្លោះស្ងាត់ "ដកដង្ហើម" ចោលឱ្យអស់ដើម្បីឱ្យសំឡេងហាប់
-    audio = effects.strip_silence(audio, silence_thresh=-50, padding=0)
-    
-    current_ms = len(audio)
-    if target_ms > 0 and current_ms > target_ms:
-        speed_ratio = current_ms / target_ms
-        audio = effects.speedup(audio, playback_speed=min(speed_ratio, 1.8), chunk_size=50, crossfade=20)
-    
-    return audio
-
-async def generate_fast_flow_audio(srt_content, voice, base_speed):
+async def generate_forced_speed_audio(srt_content, voice, base_speed):
     try:
         subs = list(srt.parse(srt_content))
     except: return None
 
     rate_str = f"{base_speed:+d}%"
-    total_ms = int(subs[-1].end.total_seconds() * 1000)
+    total_ms = int(subs[-1].end.total_seconds() * 1000) + 1000
     final_audio = AudioSegment.silent(duration=total_ms, frame_rate=44100)
     
     for i, sub in enumerate(subs):
         audio_data = await fetch_audio(sub.content, voice, rate_str)
         if audio_data:
             segment = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
-            
-            # កាត់ចន្លោះស្ងាត់ចេញឱ្យអស់មុននឹងដាក់ចូល Timeline
-            segment = process_voice_flow(segment, 0) 
+            segment = effects.strip_silence(segment, silence_thresh=-50, padding=0)
 
             start_ms = int(sub.start.total_seconds() * 1000)
+            end_ms = int(sub.end.total_seconds() * 1000)
             
-            # --- Logic កាត់បន្ថយការដកឃ្លា ---
-            # ប្រសិនបើវាឆ្ងាយពីលេខរៀងមុនពេក យើងរុញវាឱ្យមកខាងដើមបន្តិច (ឧទាហរណ៍ ៣០០មិល្លីវិនាទី)
-            # ដើម្បីឱ្យការអានបន្តគ្នាបានរលូន មិនឈប់យូរ
-            max_gap = 300 # កម្រិតដកឃ្លាអតិបរមា (ជិតបំផុត)
+            # រកមើលម៉ោងចាប់ផ្ដើមនៃលេខរៀងបន្ទាប់ (បើមាន)
+            next_start_ms = int(subs[i+1].start.total_seconds() * 1000) if i + 1 < len(subs) else end_ms
             
+            # រយៈពេលអតិបរមាដែលអនុញ្ញាតឱ្យនិយាយ (កុំឱ្យជាន់លេខរៀងបន្ទាប់)
+            allowed_duration = next_start_ms - start_ms
+            current_duration = len(segment)
+
+            # --- Logic បង្ខំពន្លឿន ---
+            if current_duration > allowed_duration and allowed_duration > 0:
+                # គណនាល្បឿនដែលត្រូវបង្កើន ដើម្បីឱ្យចប់មុនលេខរៀងបន្ទាប់
+                force_speed_ratio = current_duration / allowed_duration
+                
+                # ពន្លឿនដោយប្រើ chunk_size ខ្លី ដើម្បីឱ្យរលូនមិនស្គប់
+                segment = effects.speedup(
+                    segment, 
+                    playback_speed=min(force_speed_ratio, 2.5), # បង្កើនល្បឿនបានរហូតដល់ ២.៥ដង
+                    chunk_size=40, 
+                    crossfade=15
+                )
+                
+                # បើនៅតែលើសបន្តិច (ដោយសារក្បួន speedup) យើងកាត់តម្រឹមឱ្យស្មើ allowed_duration តែម្តង
+                segment = segment[:allowed_duration]
+
+            # Overlay ចូលក្នុង Timeline ឱ្យចំម៉ោងដែលកំណត់
             final_audio = final_audio.overlay(segment, position=start_ms)
 
     # បង្កើនកម្រិតសំឡេងឱ្យស្មើគ្នា
@@ -62,19 +69,19 @@ async def generate_fast_flow_audio(srt_content, voice, base_speed):
     return buffer.getvalue()
 
 # --- UI ---
-st.title("🎙️ Khmer TTS - កំណែអានបន្តគ្នា (កាត់បន្ថយដកឃ្លា)")
-st.info("កូដនេះនឹងធ្វើឱ្យការនិយាយពីលេខរៀងមួយ ទៅមួយទៀត មានភាពជិតគ្នា និងរលូនជាងមុន។")
+st.title("🎙️ Khmer TTS - បង្ខំពន្លឿនស្វ័យប្រវត្តិ")
+st.info("បច្ចេកទេស៖ ប្រសិនបើសំឡេងទី១ អានមិនទាន់ចប់ វានឹងពន្លឿនឱ្យលឿនបំផុតដើម្បីបញ្ចប់មុនលេខរៀងទី២ ចាប់ផ្ដើម។")
 
-voice = st.selectbox("អ្នកអាន:", ["km-KH-SreymomNeural", "km-KH-PisethNeural"])
-speed = st.slider("ល្បឿនអានមូលដ្ឋាន (%):", -50, 50, 15)
-srt_text = st.text_area("បញ្ចូលអត្ថបទ SRT:", height=200)
+voice = st.selectbox("ជ្រើសរើសអ្នកអាន:", ["km-KH-SreymomNeural", "km-KH-PisethNeural"])
+speed = st.slider("ល្បឿនអានទូទៅ (%):", -50, 50, 15)
+srt_text = st.text_area("បញ្ចូលអត្ថបទ SRT:", height=250)
 
-if st.button("🔊 ផលិតសំឡេង Flow"):
+if st.button("🔊 ផលិតសំឡេង Sync"):
     if srt_text.strip():
-        with st.spinner("កំពុងរៀបចំល្បឿនអាន..."):
+        with st.spinner("កំពុងគណនា និងបង្ខំល្បឿនឱ្យត្រូវម៉ោង..."):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            audio = loop.run_until_complete(generate_fast_flow_audio(srt_text, voice, speed))
+            audio = loop.run_until_complete(generate_forced_speed_audio(srt_text, voice, speed))
             if audio:
                 st.audio(audio)
-                st.download_button("📥 ទាញយក MP3", audio, "fast_flow_khmer.mp3")
+                st.download_button("📥 ទាញយក MP3", audio, "forced_sync.mp3")
