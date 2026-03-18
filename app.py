@@ -5,8 +5,10 @@ import srt
 import io
 from pydub import AudioSegment, effects
 
-st.set_page_config(page_title="Khmer TTS - Smart Speed", page_icon="🎙️")
+# កំណត់ការបង្ហាញទំព័រ
+st.set_page_config(page_title="Khmer TTS Studio - 320k HQ", page_icon="🎙️")
 
+# --- មុខងារទាញយកសំឡេងពី Microsoft Edge TTS ---
 async def fetch_audio(text, voice, rate_str, pitch_str):
     try:
         communicate = edge_tts.Communicate(text, voice, rate=rate_str, pitch=pitch_str)
@@ -15,79 +17,99 @@ async def fetch_audio(text, voice, rate_str, pitch_str):
             if chunk["type"] == "audio":
                 audio_data += chunk["data"]
         return audio_data
-    except: return None
+    except Exception as e:
+        return None
 
-async def generate_smart_speed_audio(srt_content, voice, multiplier, pitch_hz):
+# --- មុខងារកែច្នៃសំឡេងឱ្យពីរោះ និងច្បាស់ ---
+async def generate_studio_audio(srt_content, voice, multiplier, pitch_hz):
     try:
         subs = list(srt.parse(srt_content))
-    except: return None
+    except:
+        return None
 
-    # កំណត់ល្បឿនមូលដ្ឋាន (Base Speed)
+    # បំប្លែង Speed និង Pitch ទៅជា Format ដែល AI យល់
     percentage = int((multiplier - 1) * 100)
     rate_str = f"{percentage:+d}%"
     pitch_str = f"{pitch_hz:+d}Hz"
     
+    # បង្កើតផ្ទៃសំឡេងមេ (ទទេ)
     total_ms = int(subs[-1].end.total_seconds() * 1000) + 1000
     final_audio = AudioSegment.silent(duration=total_ms, frame_rate=44100)
     
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
     for i, sub in enumerate(subs):
+        status_text.text(f"កំពុងផលិតលេខរៀងទី: {i+1}/{len(subs)}")
         audio_data = await fetch_audio(sub.content, voice, rate_str, pitch_str)
+        
         if audio_data:
             segment = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
+            
+            # ១. កាត់ផ្នែកស្ងាត់ចេញ (Strip Silence)
             segment = effects.strip_silence(segment, silence_thresh=-50, padding=10)
+
+            # ២. បញ្ចូល Compressor ដើម្បីឱ្យសំឡេងណែន និងច្បាស់ដូចក្នុង Studio
             segment = effects.compress_dynamic_range(segment)
 
             start_ms = int(sub.start.total_seconds() * 1000)
-            end_ms = int(sub.end.total_seconds() * 1000)
             
-            # រកមើលរយៈពេលដែលអនុញ្ញាតក្នុង SRT (Duration)
             if i + 1 < len(subs):
                 next_start_ms = int(subs[i+1].start.total_seconds() * 1000)
                 allowed_duration = next_start_ms - start_ms
-            else:
-                allowed_duration = end_ms - start_ms
+                current_duration = len(segment)
 
-            current_duration = len(segment)
+                # ៣. ពន្លឿនបន្ថែមក្នុងករណីសំឡេងវែងជាងម៉ោងកំណត់ (No Gap)
+                if current_duration > allowed_duration and allowed_duration > 0:
+                    ratio = current_duration / allowed_duration
+                    segment = effects.speedup(segment, playback_speed=min(ratio, 2.0), chunk_size=50, crossfade=15)
+                    segment = segment[:allowed_duration]
 
-            # --- SMART SPEED LOGIC ---
-            # ប្រសិនបើសំឡេង AI វែងជាងកាលវិភាគ ទើបយើងពន្លឿន (Speed up the slow parts)
-            if current_duration > allowed_duration and allowed_duration > 0:
-                ratio = current_duration / allowed_duration
-                # ពន្លឿនឱ្យទាន់ពេលវេលា (កម្រិតអតិបរមា 2.0x ដើម្បីកុំឱ្យបែកសំឡេង)
-                segment = effects.speedup(segment, playback_speed=min(ratio, 2.0), chunk_size=50, crossfade=15)
-                segment = segment[:allowed_duration]
-            
-            # ប្រសិនបើសំឡេង AI ខ្លីជាងកាលវិភាគ (លឿនស្រាប់) 
-            # វានឹងរក្សាល្បឿនដើម ហើយទុកចន្លោះស្ងាត់បន្តិចនៅខាងចុងលេខរៀងនោះ
-            
+            # បញ្ចូលក្នុង Master Audio
             final_audio = final_audio.overlay(segment, position=start_ms)
         
         progress_bar.progress((i + 1) / len(subs))
 
+    # ៤. ជំហានចុងក្រោយ៖ Normalize ឱ្យឮច្បាស់ពេញកម្រិត
     final_audio = effects.normalize(final_audio)
+    
+    # ៥. នាំចេញជាឯកសារ MP3 ក្នុងកម្រិត 320k (គុណភាពខ្ពស់បំផុត)
     buffer = io.BytesIO()
     final_audio.export(buffer, format="mp3", bitrate="320k")
+    status_text.success("ការផលិតបានជោគជ័យ!")
     return buffer.getvalue()
 
-# --- UI ---
-st.title("🎙️ Khmer TTS - Smart Speed (320k)")
-st.info("💡 កូដនេះនឹងពន្លឿនតែផ្នែកណាដែលយឺតជាងម៉ោង SRT ប៉ុណ្ណោះ។ ផ្នែកដែលលឿនស្រាប់នឹងរក្សាល្បឿនធម្មតា។")
+# --- ចំណុចប្រទាក់អ្នកប្រើ (UI) ---
+st.title("🎙️ Khmer TTS Studio (320k HQ)")
+st.markdown("---")
 
 col1, col2 = st.columns(2)
 with col1:
-    voice = st.selectbox("អ្នកអាន:", ["km-KH-SreymomNeural", "km-KH-PisethNeural"])
-    speed_multiplier = st.slider("ល្បឿនមូលដ្ឋាន (Base Speed):", 0.5, 2.0, 1.0, step=0.1, format="%.1fx")
+    voice = st.selectbox("ជ្រើសរើសអ្នកអាន:", ["km-KH-SreymomNeural", "km-KH-PisethNeural"])
+    speed_multiplier = st.slider("ល្បឿនអាន (Speed):", 0.5, 2.0, 1.2, step=0.1, format="%.1fx")
+
 with col2:
     pitch_val = st.slider("កម្ពស់សំឡេង (Pitch):", -20, 20, 0, step=1, format="%dHz")
+    st.write("🔧 **ការកំណត់បច្ចេកទេស:**")
+    st.caption("✅ Bitrate: 320k (Studio Quality)")
+    st.caption("✅ Audio Effect: Dynamic Compressor")
 
-srt_text = st.text_area("បញ្ចូលអត្ថបទ SRT:", height=250)
+srt_text = st.text_area("បញ្ចូលអត្ថបទ SRT របស់អ្នក:", height=250, placeholder="1\n00:00:00,500 --> 00:00:02,000\nសួស្ដីបងប្អូនទាំងអស់គ្នា...")
 
-if st.button("🔊 ផលិតសំឡេង Smart Speed", use_container_width=True):
+if st.button("🔊 ចាប់ផ្ដើមផលិតសំឡេង 320k", use_container_width=True):
     if srt_text.strip():
-        with st.spinner("កំពុងគណនាល្បឿន និង Render សំឡេង..."):
-            audio = asyncio.run(generate_smart_speed_audio(srt_text, voice, speed_multiplier, pitch_val))
+        with st.spinner("កំពុង Render សំឡេងកម្រិតខ្ពស់..."):
+            audio = asyncio.run(generate_studio_audio(srt_text, voice, speed_multiplier, pitch_val))
             if audio:
                 st.audio(audio)
-                st.download_button("📥 ទាញយក MP3 (320k)", audio, "smart_speed_khmer.mp3")
+                st.download_button(
+                    label="📥 ទាញយក MP3 (320k HQ)",
+                    data=audio,
+                    file_name="khmer_tts_320k_hq.mp3",
+                    mime="audio/mp3"
+                )
+    else:
+        st.warning("សូមបញ្ចូលអត្ថបទ SRT ជាមុនសិន!")
+
+st.divider()
+st.caption("Khmer AI Voice Engine - Optimized for Facebook & TikTok Content")
